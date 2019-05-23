@@ -1,0 +1,291 @@
+---
+title: "WineQualityPrediction"
+author: "Yanni Papadakis"
+date: "5/23/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## ANALYSIS OF WINE QUALITY DATA USING R
+
+Use Limited Data (mostly Chemical Composition) and Machine Learning.
+
+see: https://archive.ics.uci.edu/ml/datasets/wine
+
+
+```{r preface}
+require(rpart, quietly = TRUE)
+require(keras, quietly = TRUE)
+require(xgboost, quietly = TRUE)
+require(glmnet, quietly = TRUE)
+require(RColorBrewer, quietly = TRUE)
+
+Rsq = function(y_pred, y_true) sprintf("R-sq = %.4f",cor(y_pred, y_true)**2)
+
+red = read.csv(
+  "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv",
+  sep=";")
+print(dim(red))
+
+white = read.csv(
+  "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv",
+  sep=";")
+print(dim(white))
+
+wine = rbind(
+  cbind(wine.color="red",red),
+  cbind(wine.color="white",white)
+  )
+
+rm(red,white)
+```
+
+## Exploratory Data Analysis
+
+### Wine Color
+
+```{r eda_color}
+tbl = with(wine, table(quality,wine.color))
+plot( tbl, col=c("red2","lightgrey"))
+```
+
+It is easy to predict wine color.
+
+```{r eda_color_pres}
+color.rp = rpart(wine.color~.,data=wine,parms=list(prior=c(0.5,0.5)))
+plotcp(color.rp)
+print(color.rp)
+```
+### One Way Analysis
+```{r oneway}
+for(col in names(wine)[2:12]){
+  boxplot(wine[[col]]~wine$quality,col=brewer.pal(n = 7, name = "RdBu"),
+          ylab=col,xlab='Quality',varwidth=TRUE)
+}
+```
+### Predictor Interactions
+
+```{r eda_interactions}
+
+smp = sample(nrow(wine),500)
+plot(wine[smp,2:6],panel=panel.smooth)
+plot(wine[smp,7:12],panel=panel.smooth)
+```
+## Cross Validation Prep
+
+```{r cvprep}
+n_fold = 3
+n_repeat = 5
+set.seed(2019)
+cv_folds = caret::createMultiFolds(wine$quality, k = n_fold, times = n_repeat)
+```
+
+
+## Decision Tree Analysis
+
+```{r rpart}
+oof_rpart = matrix(0,nrow=nrow(wine),ncol=n_repeat)
+
+i = 1
+rep = 1
+for(fold_ in cv_folds){
+  wine.rp = rpart(quality~.,data=wine[fold_,],cp=0.001)
+  #plotcp(wine.rp)
+  wine.rp.opt_id = which.min(apply(as.matrix(wine.rp$cptable)[,4:5],1,sum))
+  wine.rp.opt_cp = as.matrix(wine.rp$cptable)[wine.rp.opt_id,1]
+  
+  oof_rpart[-fold_,rep] = predict(prune(wine.rp,wine.rp.opt_cp), 
+                                  newdata=wine[-fold_,])
+  
+  i = i + 1
+  if(i  %% n_fold == 1){
+    rep = rep + 1    
+  }
+}
+
+
+pred_rp =  apply(oof_rpart,1,mean)
+
+#summary(prune(wine.rp,0.005))
+plot(prune(wine.rp,0.006),margin=0.1)
+text(prune(wine.rp,0.006),cex=0.63)
+
+boxplot(pred_rp~wine$quality,varwidth=TRUE,col="cornsilk",
+        sub=Rsq(pred_rp,wine$quality))
+```
+
+
+## OLS
+
+```{r ols}
+oof_lm = matrix(0,nrow=nrow(wine),ncol=n_repeat)
+
+i = 1
+rep = 1
+for(fold_ in cv_folds){
+  wine.lm = lm(quality~.+alcohol:volatile.acidity,data=wine[fold_,])
+
+  oof_lm[-fold_,rep] = predict(wine.lm,newdata=wine[-fold_,])
+  
+  i = i + 1
+  if(i  %% n_fold == 1){
+    rep = rep + 1    
+  }
+}
+
+pred_lm =  apply(oof_lm,1,mean)
+
+summary(wine.lm)
+plot(wine.lm)
+boxplot(pred_lm~wine$quality,varwidth=TRUE,col="cornsilk",
+        sub=Rsq(pred_lm,wine$quality))
+```
+
+## XGB Model
+
+```{r xgb}
+oof_xgb = matrix(0,nrow=nrow(wine),ncol=n_repeat)
+
+params <- list(
+  max_depth = 4, 
+  eta = 0.1, 
+  min_child_weight = 50,
+  #eval_metric=c('ndcg'),
+  objective = "reg:linear",
+  subsample = 0.6,
+  colsample_bytree = 0.8
+)
+
+i = 1
+rep = 1
+for(fold_ in cv_folds){
+  dtrain <- xgb.DMatrix(model.matrix(quality~.-1,data=wine[fold_,]), 
+                        label = wine$quality[fold_])
+  dtest <- xgb.DMatrix(model.matrix(quality~.-1,data=wine[-fold_,]), 
+                        label = wine$quality[-fold_])
+  wine.xgb <- xgb.train(
+    params = params, data = dtrain, nrounds = 1500,verbose = 0,
+    watchlist = list(val=dtest,trn=dtrain),
+    early_stopping_rounds = 100)
+  
+  oof_xgb[-fold_,rep] = predict(wine.xgb,dtest)
+  
+  i = i + 1
+  if(i  %% n_fold == 1){
+    rep = rep + 1    
+  }
+}
+xgb.plot.importance(xgb.importance(model=wine.xgb),measure = "Gain")
+
+pred.xgb =  apply(oof_xgb,1,mean)
+#summary(pred.xgb)
+boxplot(pred.xgb~wine$quality,varwidth=TRUE,col="cornsilk",
+        sub=Rsq(pred.xgb,wine$quality))
+
+```
+
+
+## Deep Learning Model
+
+```{r keras}
+mat = model.matrix(quality~.-1,data=wine)
+
+estimate_fc_stats = function(m) {
+  m = as.matrix(m)
+  stdev = apply(m,2,sd)
+  avg   = apply(m,2,mean)
+  data.frame(mean=avg,stdev=stdev)
+}
+
+fc_stats = estimate_fc_stats(mat)
+
+fc_standardize = function(m){
+  t(apply(m,1,function(x) (x - fc_stats$mean) / fc_stats$stdev))
+}
+
+mat_norm = fc_standardize(mat)
+# summary(mat_norm)
+
+make_model <- function(){
+  model <- keras_model_sequential()
+  model %>%
+    layer_dense(units = 64, activation = 'relu', input_shape = c(ncol(mat))) %>%
+    layer_dropout(rate = 0.35) %>% 
+    layer_dense(units = 32, activation = 'relu') %>%
+    layer_dropout(rate = 0.35) %>% 
+    layer_dense(units = 1, activation = 'linear')
+}
+
+#summary(make_model())
+
+
+oof_fc = matrix(0,nrow=nrow(wine),ncol=n_repeat)
+
+
+i = 1
+rep = 1
+for(fold_ in cv_folds){
+  
+  wine.fc <- make_model()
+  
+  wine.fc %>% compile(
+    loss = 'mse',
+    optimizer = optimizer_rmsprop(lr = 0.003, rho = 0.90, decay = 2e-4, clipvalue = 0.2)
+  )
+  
+  history <- wine.fc %>% fit(
+    mat_norm[fold_,], wine$quality[fold_],
+    batch_size = 1024,
+    epochs = 1000,
+    verbose = 0,
+    #class_weight = as.list(rep(1,7)/7),
+    validation_data = list(mat_norm[-fold_,], wine$quality[-fold_]),
+    callbacks = list(
+      callback_early_stopping(patience = 100, verbose = 1, restore_best_weights = TRUE)
+    )
+  )
+  
+  print(history)
+  #plot(history)
+  
+  oof_fc[-fold_,rep] = predict(wine.fc, mat_norm[-fold_,])
+  
+  i = i + 1
+  if(i  %% n_fold == 1){
+    rep = rep + 1    
+  }
+}
+
+pred.fc =  apply(oof_fc,1,mean)
+#summary(pred.fc)
+boxplot(pred.fc~wine$quality,varwidth=TRUE,col="cornsilk",
+        sub=Rsq(pred.fc,wine$quality))
+```
+
+# Model Stacking
+
+```{r stack}
+mod_names = ls(pattern="oof_")
+mods = mget(mod_names)
+for(m in names(mods)){
+  colnames(mods[[m]]) = paste(m,1:ncol(mods[[m]]),sep="_")
+}
+
+stack = do.call("cbind",mods)
+summary(stack)
+
+heatmap(cor(stack),main="Base Model Correlations",symm=TRUE)
+
+library(penalized)
+stack.lm = penalized(wine$quality,stack, ~0, positive=TRUE, trace=FALSE)
+barplot(coef(stack.lm),las=3,main="Stacking Coefficients")
+
+pred.stack = predict(stack.lm,stack)[,1]
+#summary(pred.stack)
+boxplot(pred.stack~wine$quality,varwidth=TRUE,
+        col="cornsilk",main="Stacking Prediction Distribution",
+        sub=Rsq(pred.stack,wine$quality))
+```
