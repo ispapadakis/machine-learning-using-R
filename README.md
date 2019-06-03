@@ -13,6 +13,6 @@ Includes Model Stacking at the end.
 
 ## US Education Datasets (Kaggle Dataset)
 
-Exploratory Data Analysis of US State Data Using Maps (and ggplot2).
+Exploratory Data Analysis of US Education State-Level Data Using Maps (and ggplot2, statebins).
 
   - [HTML](https://www.kaggle.com/yanpapadakis/us-edu-eda?scriptVersionId=15124802)
